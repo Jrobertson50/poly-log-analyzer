@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Poly Log Analyzer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #020817; color: #e2e8f0; font-family: 'IBM Plex Mono', 'Courier New', monospace; min-height: 100vh; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    .btn { cursor: pointer; border: none; font-family: inherit; transition: filter 0.15s; }
+    .btn:hover { filter: brightness(1.2); }
+    .btn:disabled { opacity: 0.4; cursor: default; filter: none; }
+    textarea { resize: vertical; font-family: 'IBM Plex Mono', monospace; }
+    #api-key-banner {
+      background: #1e1b4b; border-bottom: 1px solid #3730a3;
+      padding: 10px 20px; display: flex; align-items: center;
+      gap: 12px; font-size: 12px; color: #a5b4fc;
+    }
+    #api-key-banner input {
+      flex: 1; max-width: 420px; background: #0f172a;
+      border: 1px solid #3730a3; border-radius: 6px;
+      padding: 6px 10px; color: #e2e8f0; font-family: inherit; font-size: 12px; outline: none;
+    }
+    #api-key-banner input:focus { border-color: #6366f1; }
+    #api-key-banner button {
+      background: #4338ca; color: #e0e7ff; border: none;
+      border-radius: 6px; padding: 6px 14px; font-size: 11px;
+      font-weight: 700; cursor: pointer; font-family: inherit;
+    }
+    #api-key-banner button:hover { background: #4f46e5; }
+    #api-key-status { font-size: 11px; color: #6b7280; }
+  </style>
+</head>
+<body>
+
+<div id="api-key-banner">
+  <span>🔑 Anthropic API Key:</span>
+  <input id="apiKeyInput" type="password" placeholder="sk-ant-..." />
+  <button onclick="saveKey()">Save</button>
+  <span id="api-key-status">Not set</span>
+</div>
+
+<div id="root"></div>
+
+<script>
+// API Key management
+let ANTHROPIC_API_KEY = localStorage.getItem("poly_analyzer_api_key") || "";
+if (ANTHROPIC_API_KEY) {
+  document.getElementById("api-key-status").textContent = "Key loaded";
+  document.getElementById("api-key-status").style.color = "#86efac";
+  document.getElementById("apiKeyInput").value = ANTHROPIC_API_KEY;
+}
+function saveKey() {
+  const val = document.getElementById("apiKeyInput").value.trim();
+  if (!val) return;
+  ANTHROPIC_API_KEY = val;
+  localStorage.setItem("poly_analyzer_api_key", val);
+  const s = document.getElementById("api-key-status");
+  s.textContent = "Saved"; s.style.color = "#86efac";
+  setTimeout(() => { s.textContent = "Key active"; }, 1200);
+}
+
+const { createElement: h, useState, useCallback, useRef } = React;
+
+const LOG_TYPES = {
+  hardware:    { label: "Hardware",    color: "#f97316", icon: "⚙️" },
+  system:      { label: "System",      color: "#3b82f6", icon: "🖥️" },
+  call:        { label: "Call/Media",  color: "#10b981", icon: "📞" },
+  network:     { label: "Network",     color: "#8b5cf6", icon: "🌐" },
+  diagnostics: { label: "Diagnostics", color: "#ef4444", icon: "🔬" },
+  unknown:     { label: "Unknown",     color: "#6b7280", icon: "📄" },
+};
+
+function detectLogType(filename, content) {
+  const f = filename.toLowerCase();
+  const c = (content || "").toLowerCase().slice(0, 2000);
+  if (f.includes("hw") || f.includes("hardware") || c.includes("temperature") || c.includes("fan speed")) return "hardware";
+  if (f.includes("call") || f.includes("media") || c.includes("sip") || c.includes("h.323") || c.includes("rtp") || c.includes("codec")) return "call";
+  if (f.includes("net") || f.includes("network") || c.includes("dhcp") || c.includes("dns") || c.includes("tcp") || c.includes("icmp")) return "network";
+  if (f.includes("diag") || f.includes("dump") || c.includes("stack trace") || c.includes("crash") || c.includes("assert")) return "diagnostics";
+  if (f.includes("sys") || f.includes("system") || c.includes("kernel") || c.includes("boot") || c.includes("process")) return "system";
+  return "unknown";
+}
+
+async function callClaude(systemPrompt, userContent) {
+  const key = ANTHROPIC_API_KEY || localStorage.getItem("poly_analyzer_api_key");
+  if (!key) throw new Error("No API key set. Enter your Anthropic API key in the banner above.");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1500,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userContent }],
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `API error ${res.status}`);
+  }
+  const data = await res.json();
+  return data.content?.[0]?.text || "";
+}
+
+function Spinner() {
+  return h("div", { style: { display: "flex", alignItems: "center", gap: 8, color: "#94a3b8", fontSize: 12 } },
+    h("div", { style: { width: 14, height: 14, border: "2px solid #334155", borderTop: "2px solid #38bdf8", borderRadius: "50%", animation: "spin 0.8s linear infinite" } }),
+    "Analyzing..."
+  );
+}
+
+function SeverityBadge({ level }) {
+  const map = {
+    critical: { bg: "#7f1d1d", color: "#fca5a5", label: "CRITICAL" },
+    warning:  { bg: "#78350f", color: "#fcd34d", label: "WARNING" },
+    info:     { bg: "#1e3a5f", color: "#93c5fd", label: "INFO" },
+    ok:       { bg: "#14532d", color: "#86efac", label: "OK" },
+  };
+  const s = map[level] || map.info;
+  return h("span", { style: { background: s.bg, color: s.color, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 4, letterSpacing: 1 } }, s.label);
+}
+
+function LogCard({ log, onAnalyze }) {
+  const type = LOG_TYPES[log.type];
+  const children = [
+    h("div", { key: "header", style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 } },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+        h("span", { style: { fontSize: 16 } }, type.icon),
+        h("span", { style: { color: "#e2e8f0", fontWeight: 600, fontSize: 12 } }, log.name),
+        h("span", { style: { background: type.color + "22", color: type.color, border: "1px solid " + type.color + "44", fontSize: 10, padding: "2px 7px", borderRadius: 20 } }, type.label),
+        log.source === "paste" ? h("span", { style: { background: "#1e1b4b", color: "#a5b4fc", border: "1px solid #3730a344", fontSize: 10, padding: "2px 7px", borderRadius: 20 } }, "PASTE") : null,
+        h("span", { style: { color: "#475569", fontSize: 11 } }, log.source === "paste" ? log.content.length + " chars" : (log.size / 1024).toFixed(1) + " KB")
+      ),
+      h("button", {
+        className: "btn", onClick: () => onAnalyze(log.id), disabled: log.loading,
+        style: { background: "#0c4a6e", color: "#38bdf8", border: "1px solid #0369a133", borderRadius: 6, padding: "5px 14px", fontSize: 11, fontWeight: 700 }
+      }, log.loading ? "..." : log.result ? "Re-Analyze" : "Analyze")
+    )
+  ];
+
+  if (log.loading) children.push(h(Spinner, { key: "spinner" }));
+  if (log.error) children.push(h("div", { key: "error", style: { background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: 6, padding: "8px 12px", color: "#fca5a5", fontSize: 11, marginTop: 8 } }, log.error));
+
+  if (log.result && !log.loading) {
+    const resultChildren = [
+      h("div", { key: "badges", style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" } },
+        h(SeverityBadge, { level: log.result.severity }),
+        log.result.deviceModel ? h("span", { style: { color: "#64748b", fontSize: 11 } }, "Device: ", h("span", { style: { color: "#94a3b8" } }, log.result.deviceModel)) : null,
+        log.result.firmware ? h("span", { style: { color: "#64748b", fontSize: 11 } }, "FW: ", h("span", { style: { color: "#94a3b8" } }, log.result.firmware)) : null
+      )
+    ];
+    if (log.result.summary) resultChildren.push(h("p", { key: "summary", style: { color: "#cbd5e1", fontSize: 12, lineHeight: 1.6, marginBottom: 10 } }, log.result.summary));
+    if (log.result.errors && log.result.errors.length > 0) {
+      resultChildren.push(h("div", { key: "errors", style: { marginBottom: 10 } },
+        h("div", { style: { color: "#475569", fontSize: 10, letterSpacing: 1, marginBottom: 6 } }, "DETECTED ISSUES"),
+        ...log.result.errors.map((e, i) => h("div", { key: i, style: { display: "flex", gap: 8, marginBottom: 4, fontSize: 11, color: "#fbbf24" } }, h("span", null, "•"), h("span", null, e)))
+      ));
+    }
+    if (log.result.recommendations && log.result.recommendations.length > 0) {
+      resultChildren.push(h("div", { key: "recs" },
+        h("div", { style: { color: "#475569", fontSize: 10, letterSpacing: 1, marginBottom: 6 } }, "RECOMMENDATIONS"),
+        ...log.result.recommendations.map((r, i) => h("div", { key: i, style: { display: "flex", gap: 8, marginBottom: 4, fontSize: 11, color: "#86efac" } }, h("span", null, (i + 1) + "."), h("span", null, r)))
+      ));
+    }
+    children.push(h("div", { key: "result", style: { borderTop: "1px solid #1e293b", paddingTop: 12, marginTop: 4, animation: "fadeIn 0.3s ease" } }, ...resultChildren));
+  }
+
+  return h("div", { style: { background: "#0f172a", border: "1px solid #1e293b", borderRadius: 10, padding: "14px 16px", marginBottom: 12, animation: "fadeIn 0.3s ease" } }, ...children);
+}
+
+function PastePanel({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [label, setLabel] = useState("");
+  const [type, setType] = useState("unknown");
+
+  const handleAdd = () => {
+    if (!text.trim()) return;
+    const raw = label.trim() || ("snippet-" + Date.now() + ".log");
+    const name = raw.includes(".") ? raw : raw + ".log";
+    const detectedType = type !== "unknown" ? type : detectLogType(name, text);
+    onAdd({ id: "paste-" + Date.now() + "-" + Math.random(), name, type: detectedType, content: text, source: "paste", loading: false, result: null, error: null });
+    setText(""); setLabel(""); setType("unknown"); setOpen(false);
+  };
+
+  const panelChildren = [
+    h("button", {
+      key: "toggle", className: "btn", onClick: () => setOpen(o => !o),
+      style: { width: "100%", background: "#0f172a", color: "#64748b", padding: "12px 16px", textAlign: "left", fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }
+    }, h("span", null, "📋 Paste Log Snippet"), h("span", { style: { fontSize: 10 } }, open ? "▲ COLLAPSE" : "▼ EXPAND"))
+  ];
+
+  if (open) {
+    panelChildren.push(h("div", { key: "body", style: { background: "#080f1e", padding: 16, borderTop: "1px solid #1e293b" } },
+      h("div", { style: { display: "flex", gap: 10, marginBottom: 10 } },
+        h("input", { type: "text", placeholder: "Label (optional)", value: label, onChange: e => setLabel(e.target.value), style: { flex: 1, background: "#0f172a", border: "1px solid #1e293b", borderRadius: 6, padding: "6px 10px", color: "#e2e8f0", fontSize: 12, outline: "none", fontFamily: "inherit" } }),
+        h("select", { value: type, onChange: e => setType(e.target.value), style: { background: "#0f172a", border: "1px solid #1e293b", borderRadius: 6, padding: "6px 10px", color: "#94a3b8", fontSize: 11, outline: "none", fontFamily: "inherit" } },
+          h("option", { value: "unknown" }, "Auto-detect type"),
+          ...Object.entries(LOG_TYPES).filter(([k]) => k !== "unknown").map(([k, v]) => h("option", { key: k, value: k }, v.label))
+        )
+      ),
+      h("textarea", { placeholder: "Paste log content here...", value: text, onChange: e => setText(e.target.value), rows: 7, style: { width: "100%", background: "#0f172a", border: "1px solid #1e293b", borderRadius: 6, padding: "8px 10px", color: "#94a3b8", fontSize: 11, lineHeight: 1.5, outline: "none", marginBottom: 10 } }),
+      h("div", { style: { display: "flex", justifyContent: "flex-end" } },
+        h("button", { className: "btn", onClick: handleAdd, disabled: !text.trim(), style: { background: text.trim() ? "#1d4ed8" : "#0f172a", color: text.trim() ? "#bfdbfe" : "#334155", borderRadius: 6, padding: "7px 18px", fontSize: 12, fontWeight: 700 } }, "+ Add Snippet")
+      )
+    ));
+  }
+
+  return h("div", { style: { border: "1px solid #1e293b", borderRadius: 10, marginBottom: 16, overflow: "hidden" } }, ...panelChildren);
+}
+
+function MasterSummaryCard({ summary }) {
+  const severityColor = { critical: "#ef4444", warning: "#f59e0b", info: "#3b82f6", ok: "#10b981" }[summary.overallSeverity] || "#6b7280";
+  const headerItems = [
+    h("span", { key: "icon", style: { fontSize: 20 } }, "🔍"),
+    h("span", { key: "title", style: { color: "#f1f5f9", fontWeight: 700, fontSize: 14 } }, "MASTER DIAGNOSTIC SUMMARY"),
+    h(SeverityBadge, { key: "badge", level: summary.overallSeverity })
+  ];
+  if (summary.escalate) headerItems.push(h("span", { key: "esc", style: { background: "#7f1d1d", color: "#fca5a5", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 4, letterSpacing: 1 } }, "ESCALATE"));
+
+  const bodyChildren = [h("div", { key: "hdr", style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" } }, ...headerItems)];
+  if (summary.rootCause) {
+    bodyChildren.push(h("div", { key: "rc", style: { marginBottom: 12 } },
+      h("div", { style: { color: "#475569", fontSize: 10, letterSpacing: 1, marginBottom: 5 } }, "ROOT CAUSE ASSESSMENT"),
+      h("p", { style: { color: "#cbd5e1", fontSize: 12, lineHeight: 1.6 } }, summary.rootCause)
+    ));
+  }
+  if (summary.prioritizedActions && summary.prioritizedActions.length > 0) {
+    bodyChildren.push(h("div", { key: "actions" },
+      h("div", { style: { color: "#475569", fontSize: 10, letterSpacing: 1, marginBottom: 6 } }, "PRIORITIZED ACTIONS"),
+      ...summary.prioritizedActions.map((a, i) => h("div", { key: i, style: { display: "flex", gap: 8, marginBottom: 5, fontSize: 12, color: "#86efac" } }, h("span", { style: { color: "#475569" } }, (i + 1) + "."), h("span", null, a)))
+    ));
+  }
+
+  return h("div", { style: { background: "#0f172a", border: "1px solid " + severityColor + "55", borderRadius: 10, padding: "18px 20px", marginBottom: 24, animation: "fadeIn 0.3s ease" } }, ...bodyChildren);
+}
+
+function App() {
+  const [logs, setLogs] = useState([]);
+  const [dragging, setDragging] = useState(false);
+  const [masterSummary, setMasterSummary] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const fileInputRef = useRef();
+
+  const processFiles = useCallback(async (fileList) => {
+    const files = Array.from(fileList);
+    const newLogs = await Promise.all(files.map(async (file) => {
+      const content = await file.text().catch(() => "");
+      return { id: "file-" + Date.now() + "-" + Math.random(), name: file.name, size: file.size, type: detectLogType(file.name, content), content, source: "file", loading: false, result: null, error: null };
+    }));
+    setLogs(prev => [...prev, ...newLogs]);
+  }, []);
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault(); setDragging(false);
+    const files = [];
+    for (const item of e.dataTransfer.items) {
+      const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry && entry.isFile) files.push(item.getAsFile());
+    }
+    if (files.length) processFiles(files);
+    else if (e.dataTransfer.files.length) processFiles(e.dataTransfer.files);
+  }, [processFiles]);
+
+  const addPastedLog = useCallback((log) => setLogs(prev => [...prev, log]), []);
+
+  const analyzeLog = useCallback(async (id) => {
+    setLogs(prev => prev.map(l => l.id === id ? Object.assign({}, l, { loading: true, error: null }) : l));
+    const log = logs.find(l => l.id === id);
+    if (!log) return;
+
+    const systemPrompt = 'You are an expert Poly video/audio equipment support engineer. Analyze log files and return ONLY valid JSON (no markdown, no explanation) with this exact structure:\n{"severity":"critical|warning|info|ok","deviceModel":"string or null","firmware":"string or null","summary":"2-3 sentence plain English summary","errors":["specific error or event with timestamp if available"],"recommendations":["actionable step 1","actionable step 2"]}\nBe specific. Reference line content and timestamps when present. Focus on Poly-specific issues: SIP registration, codec negotiation, hardware faults, network connectivity, reboot loops, certificate errors.';
+
+    try {
+      const raw = await callClaude(systemPrompt, "Log file: " + log.name + "\nType: " + LOG_TYPES[log.type].label + "\n\n" + log.content.slice(0, 12000));
+      const result = JSON.parse(raw.replace(/```json|```/g, "").trim());
+      setLogs(prev => prev.map(l => l.id === id ? Object.assign({}, l, { loading: false, result }) : l));
+    } catch (err) {
+      setLogs(prev => prev.map(l => l.id === id ? Object.assign({}, l, { loading: false, error: err.message }) : l));
+    }
+  }, [logs]);
+
+  const analyzeAll = useCallback(async () => {
+    for (const log of logs.filter(l => !l.result && !l.loading)) await analyzeLog(log.id);
+  }, [logs, analyzeLog]);
+
+  const generateMasterSummary = useCallback(async () => {
+    const analyzed = logs.filter(l => l.result);
+    if (!analyzed.length) return;
+    setSummaryLoading(true); setMasterSummary(null);
+    const systemPrompt = 'You are a senior Poly equipment support engineer. Given multiple log analysis results, return ONLY valid JSON:\n{"overallSeverity":"critical|warning|info|ok","rootCause":"string","prioritizedActions":["action 1","action 2","action 3"],"escalate":false}\nNo markdown. No explanation outside the JSON.';
+    try {
+      const summaries = analyzed.map(l => "[" + l.name + " - " + l.type + "]\n" + JSON.stringify(l.result)).join("\n\n");
+      const raw = await callClaude(systemPrompt, "These logs were collected from the same device or session. Provide a unified diagnostic:\n\n" + summaries);
+      setMasterSummary(JSON.parse(raw.replace(/```json|```/g, "").trim()));
+    } catch (err) {
+      setMasterSummary({ overallSeverity: "info", rootCause: "Error: " + err.message, prioritizedActions: [], escalate: false });
+    }
+    setSummaryLoading(false);
+  }, [logs]);
+
+  const clearAll = () => { setLogs([]); setMasterSummary(null); };
+  const analyzedCount = logs.filter(l => l.result).length;
+
+  const appChildren = [
+    // Header
+    h("div", { key: "header", style: { marginBottom: 28, borderBottom: "1px solid #1e293b", paddingBottom: 20 } },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+        h("div", { style: { background: "linear-gradient(135deg, #0ea5e9, #6366f1)", width: 36, height: 36, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 } }, "📡"),
+        h("div", null,
+          h("div", { style: { fontSize: 20, fontWeight: 700, color: "#f1f5f9", letterSpacing: -0.5 } }, "POLY LOG ANALYZER"),
+          h("div", { style: { fontSize: 10, color: "#475569", letterSpacing: 2 } }, "STUDIO X / GROUP / TRIO / EAGLE EYE SERIES")
+        )
+      )
+    ),
+    // Drop Zone
+    h("div", { key: "dropzone",
+      onDrop, onDragLeave: () => setDragging(false),
+      onDragOver: (e) => { e.preventDefault(); setDragging(true); },
+      onClick: () => fileInputRef.current && fileInputRef.current.click(),
+      style: { border: "2px dashed " + (dragging ? "#38bdf8" : "#1e3a5f"), borderRadius: 12, padding: "32px 20px", textAlign: "center", cursor: "pointer", marginBottom: 16, transition: "all 0.2s", background: dragging ? "#0c1f33" : "#050e1a" }
+    },
+      h("input", { ref: fileInputRef, type: "file", multiple: true, accept: ".log,.txt,.xml,.json,.csv", style: { display: "none" }, onChange: (e) => processFiles(e.target.files) }),
+      h("div", { style: { fontSize: 28, marginBottom: 8 } }, "📂"),
+      h("div", { style: { color: dragging ? "#38bdf8" : "#64748b", fontSize: 13 } }, dragging ? "Drop files to add" : "Drag & drop log files here, or click to browse"),
+      h("div", { style: { color: "#334155", fontSize: 11, marginTop: 6 } }, ".log .txt .xml .json .csv")
+    ),
+    // Paste Panel
+    h(PastePanel, { key: "paste", onAdd: addPastedLog }),
+  ];
+
+  // Controls
+  if (logs.length > 0) {
+    const ctrlChildren = [h("span", { key: "count", style: { color: "#475569", fontSize: 12 } }, logs.length + " log" + (logs.length !== 1 ? "s" : "") + " loaded")];
+    ctrlChildren.push(h("button", { key: "all", className: "btn", onClick: analyzeAll, disabled: logs.every(l => l.result || l.loading), style: { background: "#166534", color: "#86efac", borderRadius: 6, padding: "7px 16px", fontSize: 11, fontWeight: 700 } }, "Analyze All"));
+    if (analyzedCount >= 2) ctrlChildren.push(h("button", { key: "master", className: "btn", onClick: generateMasterSummary, disabled: summaryLoading, style: { background: "#1e3a5f", color: "#38bdf8", borderRadius: 6, padding: "7px 16px", fontSize: 11, fontWeight: 700 } }, summaryLoading ? "Generating..." : "Master Summary"));
+    ctrlChildren.push(h("button", { key: "clear", className: "btn", onClick: clearAll, style: { background: "transparent", color: "#475569", border: "1px solid #1e293b", borderRadius: 6, padding: "7px 16px", fontSize: 11 } }, "Clear All"));
+    appChildren.push(h("div", { key: "controls", style: { display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" } }, ...ctrlChildren));
+  }
+
+  if (summaryLoading) appChildren.push(h("div", { key: "spinwrap", style: { marginBottom: 20 } }, h(Spinner, null)));
+  if (masterSummary && !summaryLoading) appChildren.push(h(MasterSummaryCard, { key: "master", summary: masterSummary }));
+  if (logs.length === 0) appChildren.push(h("div", { key: "empty", style: { textAlign: "center", color: "#1e3a5f", padding: "40px 0", fontSize: 12 } }, "Drop files above or paste log snippets to begin."));
+  logs.forEach(log => appChildren.push(h(LogCard, { key: log.id, log, onAnalyze: analyzeLog })));
+
+  return h("div", { style: { maxWidth: 900, margin: "0 auto", padding: "28px 20px" } }, ...appChildren);
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App, null));
+</script>
+</body>
+</html>
