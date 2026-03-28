@@ -42,8 +42,8 @@
 <body>
 
 <div id="api-key-banner">
-  <span>🔑 Anthropic API Key:</span>
-  <input id="apiKeyInput" type="password" placeholder="sk-ant-..." />
+  <span>🔑 OpenAI API Key:</span>
+  <input id="apiKeyInput" type="password" placeholder="sk-..." />
   <button onclick="saveKey()">Save</button>
   <span id="api-key-status">Not set</span>
 </div>
@@ -52,17 +52,17 @@
 
 <script>
 // API Key management
-let ANTHROPIC_API_KEY = localStorage.getItem("poly_analyzer_api_key") || "";
-if (ANTHROPIC_API_KEY) {
+let OPENAI_API_KEY = localStorage.getItem("poly_analyzer_openai_api_key") || "";
+if (OPENAI_API_KEY) {
   document.getElementById("api-key-status").textContent = "Key loaded";
   document.getElementById("api-key-status").style.color = "#86efac";
-  document.getElementById("apiKeyInput").value = ANTHROPIC_API_KEY;
+  document.getElementById("apiKeyInput").value = OPENAI_API_KEY;
 }
 function saveKey() {
   const val = document.getElementById("apiKeyInput").value.trim();
   if (!val) return;
-  ANTHROPIC_API_KEY = val;
-  localStorage.setItem("poly_analyzer_api_key", val);
+  OPENAI_API_KEY = val;
+  localStorage.setItem("poly_analyzer_openai_api_key", val);
   const s = document.getElementById("api-key-status");
   s.textContent = "Saved"; s.style.color = "#86efac";
   setTimeout(() => { s.textContent = "Key active"; }, 1200);
@@ -90,30 +90,30 @@ function detectLogType(filename, content) {
   return "unknown";
 }
 
-async function callClaude(systemPrompt, userContent) {
-  const key = ANTHROPIC_API_KEY || localStorage.getItem("poly_analyzer_api_key");
-  if (!key) throw new Error("No API key set. Enter your Anthropic API key in the banner above.");
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+async function callOpenAI(systemPrompt, userContent) {
+  const key = OPENAI_API_KEY || localStorage.getItem("poly_analyzer_openai_api_key");
+  if (!key) throw new Error("No API key set. Enter your OpenAI API key in the banner above.");
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
+      "Authorization": `Bearer ${key}`,
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "gpt-4.1-mini",
       max_tokens: 1500,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userContent }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent }
+      ],
     }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `API error ${res.status}`);
+    throw new Error(err?.error?.message || `OpenAI API error ${res.status}`);
   }
   const data = await res.json();
-  return data.content?.[0]?.text || "";
+  return data.choices?.[0]?.message?.content || "";
 }
 
 function Spinner() {
@@ -286,7 +286,7 @@ function App() {
     const systemPrompt = 'You are an expert Poly video/audio equipment support engineer. Analyze log files and return ONLY valid JSON (no markdown, no explanation) with this exact structure:\n{"severity":"critical|warning|info|ok","deviceModel":"string or null","firmware":"string or null","summary":"2-3 sentence plain English summary","errors":["specific error or event with timestamp if available"],"recommendations":["actionable step 1","actionable step 2"]}\nBe specific. Reference line content and timestamps when present. Focus on Poly-specific issues: SIP registration, codec negotiation, hardware faults, network connectivity, reboot loops, certificate errors.';
 
     try {
-      const raw = await callClaude(systemPrompt, "Log file: " + log.name + "\nType: " + LOG_TYPES[log.type].label + "\n\n" + log.content.slice(0, 12000));
+      const raw = await callOpenAI(systemPrompt, "Log file: " + log.name + "\nType: " + LOG_TYPES[log.type].label + "\n\n" + log.content.slice(0, 12000));
       const result = JSON.parse(raw.replace(/```json|```/g, "").trim());
       setLogs(prev => prev.map(l => l.id === id ? Object.assign({}, l, { loading: false, result }) : l));
     } catch (err) {
@@ -305,7 +305,7 @@ function App() {
     const systemPrompt = 'You are a senior Poly equipment support engineer. Given multiple log analysis results, return ONLY valid JSON:\n{"overallSeverity":"critical|warning|info|ok","rootCause":"string","prioritizedActions":["action 1","action 2","action 3"],"escalate":false}\nNo markdown. No explanation outside the JSON.';
     try {
       const summaries = analyzed.map(l => "[" + l.name + " - " + l.type + "]\n" + JSON.stringify(l.result)).join("\n\n");
-      const raw = await callClaude(systemPrompt, "These logs were collected from the same device or session. Provide a unified diagnostic:\n\n" + summaries);
+      const raw = await callOpenAI(systemPrompt, "These logs were collected from the same device or session. Provide a unified diagnostic:\n\n" + summaries);
       setMasterSummary(JSON.parse(raw.replace(/```json|```/g, "").trim()));
     } catch (err) {
       setMasterSummary({ overallSeverity: "info", rootCause: "Error: " + err.message, prioritizedActions: [], escalate: false });
